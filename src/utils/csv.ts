@@ -1,5 +1,27 @@
-import { AccountInsert, CSV_HEADERS, CSV_HEADER_LABELS } from '../types';
+import { Account } from '../types';
 import Papa from 'papaparse';
+
+export const CSV_HEADERS = [
+  'profile_name', 'email', 'email_password', 'amazon_password', 'phone',
+  'register_date', 'account_holder_name', 'address', 'card_used', 'notes', 'status',
+  'prime_activation_date', 'luna_activation_date'
+];
+
+export const CSV_HEADER_LABELS = {
+  profile_name: 'Tên Profile',
+  email: 'Email',
+  email_password: 'Mật khẩu Email',
+  amazon_password: 'Mật khẩu Amazon',
+  phone: 'Số điện thoại',
+  register_date: 'Ngày đăng ký',
+  account_holder_name: 'Tên chủ tài khoản',
+  address: 'Địa chỉ',
+  card_used: 'Thẻ đang sử dụng',
+  notes: 'Ghi chú',
+  status: 'Trạng thái',
+  prime_activation_date: 'Ngày kích Prime Trial',
+  luna_activation_date: 'Ngày kích Luna Trial'
+};
 
 export function generateSampleCSV(): string {
   const headers = CSV_HEADERS.map(h => CSV_HEADER_LABELS[h]).join(',');
