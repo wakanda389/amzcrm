@@ -1,5 +1,22 @@
-import { Account } from '../types';
 import Papa from 'papaparse';
+
+export interface Account {
+  id?: string;
+  profile_name: string;
+  email: string;
+  email_password?: string;
+  amazon_password?: string;
+  phone?: string;
+  register_date?: string;
+  account_holder_name?: string;
+  address?: string;
+  card_used?: string;
+  notes?: string;
+  status: string;
+  prime_activation_date?: string;
+  luna_activation_date?: string;
+  created_at?: string;
+}
 
 export const CSV_HEADERS = [
   'profile_name', 'email', 'email_password', 'amazon_password', 'phone',
@@ -7,7 +24,7 @@ export const CSV_HEADERS = [
   'prime_activation_date', 'luna_activation_date'
 ];
 
-export const CSV_HEADER_LABELS = {
+export const CSV_HEADER_LABELS: Record<string, string> = {
   profile_name: 'Tên Profile',
   email: 'Email',
   email_password: 'Mật khẩu Email',
@@ -23,54 +40,70 @@ export const CSV_HEADER_LABELS = {
   luna_activation_date: 'Ngày kích Luna Trial'
 };
 
-export function generateSampleCSV(): string {
-  const headers = CSV_HEADERS.map(h => CSV_HEADER_LABELS[h]).join(',');
-  const rows = [
-    'Profile 01,email1@gmail.com,password123,Nguyen Van A,0912345678,Visa,1234,123 Nguyen Trai, Gò Vấp, TP.HCM,Prime đang chạy,prime_trial_running,' + new Date().toISOString().split('T')[0],
-    'Profile 02,email2@gmail.com,pass456,Tran Thi B,0987654321,Mastercard,5678,456 Le Lai, Q1, TP.HCM,Đã hủy Prime chờ hết hạn,prime_trial_cancelled,' + new Date().toISOString().split('T')[0],
-    'Profile 03,email3@gmail.com,secret789,Le Van C,0909123456,Visa,9012,789 Phan Xich Long, Phú Nhuận, TP.HCM,Cần kích Luna,luna_needed,' + new Date().toISOString().split('T')[0],
+// Hàm tải file mẫu CSV chuẩn cho người dùng điền dữ liệu
+export const downloadSampleCSV = () => {
+  const sampleData = [
+    {
+      profile_name: 'Profile_001',
+      email: 'example1@gmail.com',
+      email_password: 'pass_email_123',
+      amazon_password: 'pass_amazon_123',
+      phone: '0912345678',
+      register_date: '2026-06-30',
+      account_holder_name: 'Nguyen Van A',
+      address: '123 Duong Le Loi, Q1, HCM',
+      card_used: 'Visa...1234',
+      notes: 'Tai khoan dung thu',
+      status: 'Prime Trial - Đang chạy',
+      prime_activation_date: '2026-06-30',
+      luna_activation_date: ''
+    }
   ];
-  return [headers, ...rows].join('\n');
-}
 
-export function downloadSampleCSV() {
-  const csv = generateSampleCSV();
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const csv = Papa.unparse({
+    fields: CSV_HEADERS,
+    data: sampleData.map(item => CSV_HEADERS.map(header => item[header as keyof typeof item] || ''))
+  });
+
+  // Thêm BOM để Excel đọc được tiếng Việt UTF-8 không bị lỗi font
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
   const link = document.createElement('a');
   link.href = URL.createObjectURL(blob);
-  link.download = 'mau_nhap_tai_khoan.csv';
+  link.setAttribute('download', 'amazon_crm_template.csv');
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
-  URL.revokeObjectURL(link.href);
-}
+};
 
-export function parseCSV(file: File): Promise<AccountInsert[]> {
+// Hàm xử lý đọc file CSV khi upload lên hệ thống
+export const parseCSV = (file: File): Promise<Partial<Account>[]> => {
   return new Promise((resolve, reject) => {
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
       complete: (results) => {
-        const rows = results.data as Record<string, string>[];
-        const accounts: AccountInsert[] = [];
-        for (const row of rows) {
-          const account: AccountInsert = { profile_name: '', email: '', password: '' };
-          for (const key of CSV_HEADERS) {
-            const label = CSV_HEADER_LABELS[key];
-            const value = row[label] || row[key] || '';
-            if (key === 'stage_start_date') {
-              (account as Record<string, unknown>)[key] = value || new Date().toISOString().split('T')[0];
-            } else {
-              (account as Record<string, unknown>)[key] = value;
-            }
-          }
-          if (account.profile_name && account.email && account.password) {
-            accounts.push(account);
-          }
-        }
-        resolve(accounts);
+        const parsedAccounts = results.data.map((row: any) => {
+          return {
+            profile_name: row.profile_name || row['Tên Profile'] || '',
+            email: row.email || row['Email'] || '',
+            email_password: row.email_password || row['Mật khẩu Email'] || '',
+            amazon_password: row.amazon_password || row['Mật khẩu Amazon'] || '',
+            phone: row.phone || row['Số điện thoại'] || '',
+            register_date: row.register_date || row['Ngày đăng ký'] || '',
+            account_holder_name: row.account_holder_name || row['Tên chủ tài khoản'] || '',
+            address: row.address || row['Địa chỉ'] || '',
+            card_used: row.card_used || row['Thẻ đang sử dụng'] || '',
+            notes: row.notes || row['Ghi chú'] || '',
+            status: row.status || row['Trạng thái'] || 'Prime Trial - Đang chạy',
+            prime_activation_date: row.prime_activation_date || row['Ngày kích Prime Trial'] || '',
+            luna_activation_date: row.luna_activation_date || row['Ngày kích Luna Trial'] || ''
+          };
+        });
+        resolve(parsedAccounts);
       },
-      error: (err) => reject(err),
+      error: (error) => {
+        reject(error);
+      }
     });
   });
-}
+};
