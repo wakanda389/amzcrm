@@ -1,4 +1,4 @@
-import { Account, CSV_HEADERS, CSV_HEADER_LABELS } from '../types';
+import { AccountInsert, CSV_HEADERS, CSV_HEADER_LABELS } from '../types';
 import Papa from 'papaparse';
 
 export function generateSampleCSV(): string {
@@ -23,23 +23,23 @@ export function downloadSampleCSV() {
   URL.revokeObjectURL(link.href);
 }
 
-export function parseCSV(file: File): Promise<Partial<Account>[]> {
+export function parseCSV(file: File): Promise<AccountInsert[]> {
   return new Promise((resolve, reject) => {
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
       complete: (results) => {
         const rows = results.data as Record<string, string>[];
-        const accounts: Partial<Account>[] = [];
+        const accounts: AccountInsert[] = [];
         for (const row of rows) {
-          const account: Partial<Account> = {};
+          const account: AccountInsert = { profile_name: '', email: '', password: '' };
           for (const key of CSV_HEADERS) {
             const label = CSV_HEADER_LABELS[key];
             const value = row[label] || row[key] || '';
             if (key === 'stage_start_date') {
-              account[key] = value || new Date().toISOString().split('T')[0];
+              (account as Record<string, unknown>)[key] = value || new Date().toISOString().split('T')[0];
             } else {
-              account[key] = value;
+              (account as Record<string, unknown>)[key] = value;
             }
           }
           if (account.profile_name && account.email && account.password) {
