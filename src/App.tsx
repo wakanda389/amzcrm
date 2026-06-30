@@ -1,277 +1,252 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ShoppingBag } from 'lucide-react';
-import type { Account, AccountInput, FilterTab, WorkflowStatus } from './types';
-import { nextWorkflowStatus } from './types';
-import { loadAccounts, saveAccounts, genId } from './lib/storage';
-import { seedAccounts } from './lib/seed';
-import { accountsToCSV, downloadCSV } from './lib/csv';
-import { todayISO } from './lib/date';
-import { getDailyTasks, totalDailyTasks, getWarnings } from './lib/workflow';
-import Header from './components/Header';
-import StatsCards from './components/StatsCards';
-import WarningsBanner from './components/WarningsBanner';
-import Toolbar from './components/Toolbar';
-import AccountsTable from './components/AccountsTable';
-import AccountFormModal from './components/AccountFormModal';
-import ConfirmDeleteModal from './components/ConfirmDeleteModal';
-import DailyTasksView from './components/DailyTasksView';
-import AccountDrawer from './components/AccountDrawer';
-import CardUsageChart from './components/CardUsageChart';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import {
+  Plus, Upload, Download, Search, RefreshCw, Loader2,
+} from 'lucide-react';
+import { supabase } from './lib/supabase';
+import { Account, Stage, STAGE_LABELS } from './types';
+import { downloadSampleCSV, parseCSV } from './utils/csv';
+import AnalyticsTopSection from './components/AnalyticsTopSection';
+import AccountTable from './components/AccountTable';
+import AccountModal from './components/AccountModal';
+import Toast from './components/Toast';
 
 export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<FilterTab>('all');
-  const [selectedCard, setSelectedCard] = useState<string | null>(null);
-  const [formOpen, setFormOpen] = useState(false);
-  const [editing, setEditing] = useState<Account | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<Account | null>(null);
-  const [selected, setSelected] = useState<Account | null>(null);
-  const [alertDismissed, setAlertDismissed] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<Account | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
 
-  // Load from localStorage on mount; seed if empty
-  useEffect(() => {
-    const stored = loadAccounts();
-    if (stored.length === 0) {
-      setAccounts(seedAccounts());
-    } else {
-      setAccounts(stored);
-    }
+  const showToast = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
   }, []);
 
-  // Persist on change
-  useEffect(() => {
-    if (accounts.length === 0) return;
-    saveAccounts(accounts);
-  }, [accounts]);
-
-  // Keep the selected drawer account in sync with accounts state (e.g. after advance/edit)
-  useEffect(() => {
-    if (!selected) return;
-    const updated = accounts.find((a) => a.id === selected.id) ?? null;
-    if (updated && updated !== selected) setSelected(updated);
-    if (!updated) setSelected(null);
-  }, [accounts, selected]);
-
-  const dailyTasks = useMemo(() => getDailyTasks(accounts), [accounts]);
-  const dailyCount = totalDailyTasks(dailyTasks);
-  const warningAccounts = useMemo(
-    () => accounts.filter((a) => getWarnings(a).length > 0),
-    [accounts]
-  );
-  const showWarningsBanner = !alertDismissed && warningAccounts.length > 0;
-
-  const counts = useMemo<Record<FilterTab, number>>(
-    () => ({
-      all: accounts.length,
-      daily: dailyCount,
-      prime_running: accounts.filter((a) => a.workflowStatus === 'prime_running').length,
-      prime_cancelled: accounts.filter((a) => a.workflowStatus === 'prime_cancelled').length,
-      need_luna: accounts.filter((a) => a.workflowStatus === 'need_luna').length,
-      luna_running: accounts.filter((a) => a.workflowStatus === 'luna_running').length,
-      prime_paid: accounts.filter((a) => a.workflowStatus === 'prime_paid').length,
-    }),
-    [accounts, dailyCount]
-  );
-
-  const dailyAccountIds = useMemo(() => {
-    const ids = new Set<string>();
-    dailyTasks.cancelPrime.forEach((t) => ids.add(t.account.id));
-    dailyTasks.startLuna.forEach((t) => ids.add(t.account.id));
-    dailyTasks.startPaidPrime.forEach((t) => ids.add(t.account.id));
-    return ids;
-  }, [dailyTasks]);
-
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return accounts
-      .filter((a) => {
-        if (filter === 'all') {
-          // no status filter
-        } else if (filter === 'daily') {
-          if (!dailyAccountIds.has(a.id)) return false;
-        } else {
-          if (a.workflowStatus !== (filter as WorkflowStatus)) return false;
-        }
-        if (selectedCard && a.cardInUse !== selectedCard) return false;
-        if (!q) return true;
-        return (
-          a.profileName.toLowerCase().includes(q) ||
-          a.email.toLowerCase().includes(q) ||
-          (a.holderName || '').toLowerCase().includes(q) ||
-          (a.cardInUse || '').toLowerCase().includes(q)
-        );
-      })
-      .sort((a, b) => a.stt - b.stt);
-  }, [accounts, search, filter, dailyAccountIds, selectedCard]);
-
-  const openAdd = () => {
-    setEditing(null);
-    setFormOpen(true);
-  };
-
-  const openEdit = (a: Account) => {
-    setEditing(a);
-    setFormOpen(true);
-  };
-
-  const handleSubmit = (input: AccountInput) => {
-    if (editing) {
-      setAccounts((prev) =>
-        prev.map((a) => (a.id === editing.id ? { ...a, ...input } : a))
-      );
+  const fetchAccounts = useCallback(async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('amazon_accounts')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) {
+      showToast('Lỗi tải dữ liệu: ' + error.message, 'error');
     } else {
-      setAccounts((prev) => {
-        const nextStt = prev.length === 0 ? 1 : Math.max(...prev.map((a) => a.stt)) + 1;
-        const newAccount: Account = { id: genId(), stt: nextStt, ...input };
-        return [...prev, newAccount];
-      });
+      setAccounts(data || []);
     }
-    setFormOpen(false);
-    setEditing(null);
+    setLoading(false);
+  }, [showToast]);
+
+  useEffect(() => {
+    fetchAccounts();
+  }, [fetchAccounts]);
+
+  const filteredAccounts = accounts.filter(a =>
+    a.profile_name.toLowerCase().includes(search.toLowerCase()) ||
+    a.email.toLowerCase().includes(search.toLowerCase()) ||
+    (a.owner_name?.toLowerCase() || '').includes(search.toLowerCase()) ||
+    (a.phone?.toLowerCase() || '').includes(search.toLowerCase())
+  );
+
+  const handleSave = async (data: Partial<Account>) => {
+    if (editingAccount) {
+      const { error } = await supabase
+        .from('amazon_accounts')
+        .update(data)
+        .eq('id', editingAccount.id);
+      if (error) {
+        showToast('Lỗi cập nhật: ' + error.message, 'error');
+      } else {
+        showToast('Cập nhật thành công!', 'success');
+        setModalOpen(false);
+        setEditingAccount(null);
+        fetchAccounts();
+      }
+    } else {
+      const { error } = await supabase.from('amazon_accounts').insert(data);
+      if (error) {
+        showToast('Lỗi thêm tài khoản: ' + error.message, 'error');
+      } else {
+        showToast('Thêm tài khoản thành công!', 'success');
+        setModalOpen(false);
+        fetchAccounts();
+      }
+    }
   };
 
-  const handleDelete = () => {
-    if (!deleteTarget) return;
-    const targetId = deleteTarget.id;
-    setAccounts((prev) => prev.filter((a) => a.id !== targetId));
-    if (selected?.id === targetId) setSelected(null);
-    setDeleteTarget(null);
+  const handleDelete = async (id: string) => {
+    const { error } = await supabase.from('amazon_accounts').delete().eq('id', id);
+    if (error) {
+      showToast('Lỗi xóa: ' + error.message, 'error');
+    } else {
+      showToast('Đã xóa tài khoản!', 'success');
+      fetchAccounts();
+    }
   };
 
-  const handleAdvance = (account: Account) => {
-    const next = nextWorkflowStatus(account.workflowStatus);
-    if (next === account.workflowStatus) return;
-    setAccounts((prev) =>
-      prev.map((a) =>
-        a.id === account.id
-          ? {
-              ...a,
-              workflowStatus: next,
-              lunaTrialDate:
-                next === 'luna_running' && !a.lunaTrialDate
-                  ? todayISO()
-                  : shouldKeepLunaDate(next)
-                  ? a.lunaTrialDate
-                  : null,
-            }
-          : a
-      )
-    );
+  const handleStageAdvance = async (account: Account) => {
+    const stages: Stage[] = [
+      'prime_trial_running',
+      'prime_trial_cancelled',
+      'luna_needed',
+      'luna_trial_running',
+      'prime_paid_active',
+    ];
+    const idx = stages.indexOf(account.stage);
+    if (idx >= 0 && idx < stages.length - 1) {
+      const next = stages[idx + 1];
+      const { error } = await supabase
+        .from('amazon_accounts')
+        .update({ stage: next, stage_start_date: new Date().toISOString().split('T')[0] })
+        .eq('id', account.id);
+      if (error) {
+        showToast('Lỗi chuyển giai đoạn: ' + error.message, 'error');
+      } else {
+        showToast(`Chuyển sang: ${STAGE_LABELS[next]}`, 'success');
+        fetchAccounts();
+      }
+    }
   };
 
-  const handleExport = () => {
-    const csv = accountsToCSV(accounts);
-    const date = todayISO();
-    downloadCSV(`amazon-accounts-${date}.csv`, csv);
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const rows = await parseCSV(file);
+      const valid = rows.filter(r => r.profile_name && r.email && r.password);
+      if (valid.length === 0) {
+        showToast('Không tìm thấy dữ liệu hợp lệ trong file!', 'error');
+        setImporting(false);
+        return;
+      }
+      const { error } = await supabase.from('amazon_accounts').insert(valid);
+      if (error) {
+        showToast('Lỗi nhập dữ liệu: ' + error.message, 'error');
+      } else {
+        showToast(`Đã nhập thành công ${valid.length} tài khoản!`, 'success');
+        fetchAccounts();
+      }
+    } catch (err) {
+      showToast('Lỗi đọc file CSV: ' + (err as Error).message, 'error');
+    }
+    setImporting(false);
+    if (fileRef.current) fileRef.current.value = '';
   };
-
-  const isDailyView = filter === 'daily';
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <Header onAdd={openAdd} onExport={handleExport} total={accounts.length} />
+    <div className="min-h-screen bg-slate-900">
+      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
-        {/* Page title */}
-        <div className="mb-6">
-          <div className="flex items-center gap-2 text-xs font-medium text-slate-400">
-            <ShoppingBag className="h-3.5 w-3.5" />
-            <span>Dashboard</span>
-            <span className="text-slate-300">/</span>
-            <span className="text-slate-600">Tài khoản Amazon</span>
-          </div>
-          <h2 className="mt-1.5 text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
-            Quản lý tài khoản Amazon
-          </h2>
-          <p className="mt-1 text-sm text-slate-500">
-            Theo dõi profile, mật khẩu và quy trình Prime / Luna Trial của đội nhóm.
-          </p>
-        </div>
-
-        {/* Stats */}
-        <StatsCards accounts={accounts} />
-
-        {/* Warnings banner */}
-        {showWarningsBanner && (
-          <div className="mt-5">
-            <WarningsBanner
-              accounts={warningAccounts}
-              onDismiss={() => setAlertDismissed(true)}
-            />
-          </div>
-        )}
-
-        {/* Toolbar */}
-        <div className="mt-6">
-          <Toolbar
-            search={search}
-            onSearch={setSearch}
-            filter={filter}
-            onFilter={setFilter}
-            counts={counts}
-          />
-        </div>
-
-        {/* Daily tasks Kanban or main split layout */}
-        <div className="mt-4">
-          {isDailyView ? (
-            <DailyTasksView accounts={accounts} onAdvance={handleAdvance} />
-          ) : (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_340px]">
-              <AccountsTable
-                accounts={filtered}
-                selectedId={selected?.id}
-                onSelect={setSelected}
-                onEdit={openEdit}
-                onDelete={(a) => setDeleteTarget(a)}
-                onAdvance={handleAdvance}
-              />
-              <div className="xl:sticky xl:top-20 xl:self-start">
-                <CardUsageChart
-                  accounts={accounts}
-                  selectedCard={selectedCard}
-                  onSelectCard={setSelectedCard}
-                />
-              </div>
+      {/* Header */}
+      <header className="sticky top-0 z-40 bg-slate-900/80 backdrop-blur-md border-b border-slate-700">
+        <div className="max-w-[1600px] mx-auto px-4 py-3 flex flex-col md:flex-row md:items-center gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg">
+              <span className="text-white font-bold text-lg">A</span>
             </div>
-          )}
-        </div>
+            <div>
+              <h1 className="text-lg font-bold text-white leading-tight">Amazon CRM</h1>
+              <p className="text-xs text-slate-400">Quản lý tài khoản Amazon</p>
+            </div>
+          </div>
 
-        {/* Footer */}
-        <footer className="mt-10 border-t border-slate-200 pt-5 text-center text-xs text-slate-400">
-          Amazon Accounts Manager · Quy trình Prime Trial → Luna Trial → Prime Trả Phí · Dữ liệu lưu cục bộ (LocalStorage)
-        </footer>
+          <div className="flex-1" />
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+              <input
+                type="text"
+                placeholder="Tìm kiếm..."
+                className="input-field pl-9 w-64"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+              />
+            </div>
+
+            <button
+              onClick={() => {
+                setEditingAccount(null);
+                setModalOpen(true);
+              }}
+              className="btn-primary"
+            >
+              <Plus className="w-4 h-4" />
+              Thêm tài khoản
+            </button>
+
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={importing}
+              className="btn-secondary"
+            >
+              {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              Nhập từ File Excel/CSV
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv"
+              className="hidden"
+              onChange={handleImport}
+            />
+
+            <button
+              onClick={downloadSampleCSV}
+              className="btn-secondary"
+            >
+              <Download className="w-4 h-4" />
+              Tải File Mẫu
+            </button>
+
+            <button
+              onClick={fetchAccounts}
+              className="btn-secondary"
+              title="Làm mới"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content */}
+      <main className="max-w-[1600px] mx-auto px-4 py-6">
+        {loading ? (
+          <div className="flex items-center justify-center h-64">
+            <Loader2 className="w-8 h-8 animate-spin text-amber-500" />
+          </div>
+        ) : (
+          <>
+            <AnalyticsTopSection accounts={accounts} />
+            <AccountTable
+              accounts={filteredAccounts}
+              onEdit={(a) => {
+                setEditingAccount(a);
+                setModalOpen(true);
+              }}
+              onDelete={handleDelete}
+              onStageAdvance={handleStageAdvance}
+              onShowToast={showToast}
+            />
+          </>
+        )}
       </main>
 
-      <AccountDrawer
-        account={selected}
-        onClose={() => setSelected(null)}
-        onEdit={openEdit}
-        onDelete={(a) => setDeleteTarget(a)}
-        onAdvance={handleAdvance}
-      />
-
-      <AccountFormModal
-        open={formOpen}
-        initial={editing}
-        onClose={() => {
-          setFormOpen(false);
-          setEditing(null);
-        }}
-        onSubmit={handleSubmit}
-      />
-
-      <ConfirmDeleteModal
-        open={!!deleteTarget}
-        account={deleteTarget}
-        onCancel={() => setDeleteTarget(null)}
-        onConfirm={handleDelete}
-      />
+      {/* Modal */}
+      {modalOpen && (
+        <AccountModal
+          account={editingAccount}
+          onClose={() => {
+            setModalOpen(false);
+            setEditingAccount(null);
+          }}
+          onSave={handleSave}
+          onDelete={editingAccount ? handleDelete : undefined}
+        />
+      )}
     </div>
   );
-}
-
-function shouldKeepLunaDate(status: WorkflowStatus): boolean {
-  return status === 'luna_running' || status === 'prime_paid';
 }
